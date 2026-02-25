@@ -95,6 +95,9 @@ class ChatService:
             user_chat_ids = self._chat_ids_for_user_locked(user_id)
 
         await self._connection_manager.disconnect(user_id)
+        if not user_chat_ids:
+            self._writer.enqueue_event("disconnect", username, None, {"user_id": user_id})
+            return
         for chat_id in user_chat_ids:
             await self.broadcast_presence(chat_id)
         self._writer.enqueue_event("disconnect", username, None, {"user_id": user_id})
@@ -132,6 +135,8 @@ class ChatService:
             if chat is None:
                 return
             recipient_ids = list(chat.members)
+            if not recipient_ids:
+                return
             online_user_ids = sorted(
                 [member_id for member_id in recipient_ids if self._connection_manager.is_connected(member_id)]
             )
@@ -203,8 +208,11 @@ class ChatService:
             user = self._require_user_locked(user_id)
 
             is_new_member = not chat.has_member(user_id)
+            serialized_user = None
             if is_new_member:
                 chat.add_member(user_id)
+            else:
+                serialized_user = self._serialize_chat_locked(chat, viewer_id=user_id)
 
             system_message = None
             if is_new_member:
@@ -223,6 +231,14 @@ class ChatService:
                 if system_message is not None
                 else None
             )
+
+        if not is_new_member and serialized_user is not None:
+            await self._connection_manager.send(
+                user_id,
+                build_event("chat_upsert", payload={"chat": serialized_user}, chat_id=chat_id),
+            )
+            await self.broadcast_presence(chat_id)
+            return
 
         if is_new_member:
             self._writer.enqueue_event("join_room", user.username, chat_id, {"chat_id": chat_id})

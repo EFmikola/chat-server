@@ -18,6 +18,11 @@ class InboundEvent:
 
 
 def parse_raw_event(raw_message: str, default_limit: int, max_limit: int) -> InboundEvent:
+    if not isinstance(raw_message, str):
+        raise ValidationError("Incoming payload must be text")
+    if len(raw_message) > 65536:
+        raise ValidationError("Incoming payload is too large")
+
     try:
         data = json.loads(raw_message)
     except json.JSONDecodeError as exc:
@@ -29,6 +34,9 @@ def parse_raw_event(raw_message: str, default_limit: int, max_limit: int) -> Inb
     event_type = data.get("type")
     if not isinstance(event_type, str) or not event_type.strip():
         raise ValidationError("Field 'type' is required and must be a non-empty string")
+    event_type = event_type.strip()
+    if len(event_type) > 64:
+        raise ValidationError("Field 'type' is too long")
 
     payload = data.get("payload", {})
     if payload is None:
@@ -37,8 +45,12 @@ def parse_raw_event(raw_message: str, default_limit: int, max_limit: int) -> Inb
         raise ValidationError("Field 'payload' must be an object")
 
     chat_id = data.get("chat_id", payload.get("chat_id"))
-    if chat_id is not None and not isinstance(chat_id, str):
-        raise ValidationError("Field 'chat_id' must be a string")
+    if chat_id is not None:
+        if not isinstance(chat_id, str):
+            raise ValidationError("Field 'chat_id' must be a string")
+        chat_id = chat_id.strip()
+        if not chat_id:
+            raise ValidationError("Field 'chat_id' cannot be empty")
 
     before = None
     limit = None
@@ -60,7 +72,7 @@ def parse_raw_event(raw_message: str, default_limit: int, max_limit: int) -> Inb
         limit = limit_raw
 
     return InboundEvent(
-        event_type=event_type.strip(),
+        event_type=event_type,
         chat_id=chat_id,
         payload=payload,
         before=before,
