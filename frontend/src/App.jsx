@@ -15,11 +15,14 @@ function sortChats(chats) {
 function mergeMessages(existing = [], incoming = []) {
   const byId = new Map();
   [...existing, ...incoming].forEach((message) => {
-    byId.set(message.id, message);
+    const key = message.id ?? `${message.chat_id}:${message.created_at}:${message.sender_username}:${message.content}`;
+    byId.set(key, message);
   });
 
   return [...byId.values()].sort((left, right) => {
-    return Date.parse(left.created_at) - Date.parse(right.created_at);
+    const leftTs = Date.parse(left.created_at ?? "");
+    const rightTs = Date.parse(right.created_at ?? "");
+    return (Number.isNaN(leftTs) ? 0 : leftTs) - (Number.isNaN(rightTs) ? 0 : rightTs);
   });
 }
 
@@ -358,9 +361,9 @@ function App() {
     }
 
     const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldScrollBottomRef.current = distanceToBottom < 20;
+    shouldScrollBottomRef.current = distanceToBottom < 32;
 
-    if (container.scrollTop > 20) {
+    if (container.scrollTop > 24) {
       return;
     }
 
@@ -372,6 +375,9 @@ function App() {
     }
 
     const oldestMessage = selectedMessages[0];
+    if (!oldestMessage) {
+      return;
+    }
     const before = oldestMessage?.created_at;
     requestHistory(selectedChatId, before);
   };
