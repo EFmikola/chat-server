@@ -101,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
                 if user_id is None:
                     exc = NotConnectedError("Please send 'connect' event first")
+                    logger.warning("Rejected unauthenticated event: %s", event.event_type)
                     await websocket.send_text(json.dumps(build_error_event(exc.code, exc.message), ensure_ascii=False))
                     service.enqueue_error_event(user_id=None, error_code=exc.code, message=exc.message)
                     continue
