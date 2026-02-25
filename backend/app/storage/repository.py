@@ -14,7 +14,8 @@ class SQLiteRepository:
 
     def init_db(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages_archive (
@@ -51,9 +52,12 @@ class SQLiteRepository:
                 ON events_log(event_type, created_at)
                 """
             )
+        finally:
+            connection.close()
 
     def insert_message(self, message: Message) -> None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 """
                 INSERT OR REPLACE INTO messages_archive (
@@ -69,6 +73,9 @@ class SQLiteRepository:
                     message.kind,
                 ),
             )
+            connection.commit()
+        finally:
+            connection.close()
 
     def insert_event(
         self,
@@ -79,7 +86,8 @@ class SQLiteRepository:
         created_at: datetime,
     ) -> None:
         serialized_payload = json.dumps(payload or {}, ensure_ascii=False)
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 """
                 INSERT INTO events_log (
@@ -88,6 +96,9 @@ class SQLiteRepository:
                 """,
                 (event_type, username, chat_id, serialized_payload, created_at.isoformat()),
             )
+            connection.commit()
+        finally:
+            connection.close()
 
     def fetch_messages_page(self, chat_id: str, before: datetime | None, limit: int) -> tuple[list[Message], bool]:
         query = (
@@ -107,8 +118,11 @@ class SQLiteRepository:
             params.append(before.isoformat())
         params.append(limit + 1)
 
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             rows = connection.execute(query.format(before_clause=before_clause), params).fetchall()
+        finally:
+            connection.close()
 
         has_more = len(rows) > limit
         if has_more:
