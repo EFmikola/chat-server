@@ -481,6 +481,9 @@ function App() {
                       <span className="chat-preview">{chat.last_message_preview || "No messages yet"}</span>
                       <span className="chat-kind">{chat.type === "dm" ? "DM" : "ROOM"}</span>
                     </div>
+                    <div className="chat-card-id" title={chat.id}>
+                      ID: {chat.id}
+                    </div>
                   </button>
                 );
               })}
@@ -490,7 +493,14 @@ function App() {
 
         <section className="chat-panel">
           <div className="chat-panel-head">
-            <div className="chat-panel-title">{selectedChat ? selectedChat.title : "Select chat"}</div>
+            <div className="chat-panel-title-wrap">
+              <div className="chat-panel-title">{selectedChat ? selectedChat.title : "Select chat"}</div>
+              {selectedChat ? (
+                <div className="chat-panel-id" title={selectedChat.id}>
+                  ID: {selectedChat.id}
+                </div>
+              ) : null}
+            </div>
             <div className="chat-panel-meta">
               {selectedChat ? (
                 <span>

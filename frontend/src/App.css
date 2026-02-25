@@ -224,6 +224,15 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.chat-card-id {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-panel {
   display: flex;
   flex-direction: column;
@@ -242,6 +251,20 @@ button:disabled {
 .chat-panel-title {
   font-size: 1.05rem;
   font-weight: 700;
+}
+
+.chat-panel-title-wrap {
+  min-width: 0;
+}
+
+.chat-panel-id {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-panel-meta {
