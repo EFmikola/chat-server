@@ -1,16 +1,59 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
+
+function sortChats(chats) {
+  return [...chats].sort((left, right) => {
+    const leftTs = left.last_message_at ? Date.parse(left.last_message_at) : 0;
+    const rightTs = right.last_message_at ? Date.parse(right.last_message_at) : 0;
+    return rightTs - leftTs;
+  });
+}
+
+function mergeMessages(existing = [], incoming = []) {
+  const byId = new Map();
+  [...existing, ...incoming].forEach((message) => {
+    byId.set(message.id, message);
+  });
+
+  return [...byId.values()].sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+}
+
+function upsertChat(chats, nextChat) {
+  const index = chats.findIndex((chat) => chat.id === nextChat.id);
+  if (index === -1) {
+    return sortChats([nextChat, ...chats]);
+  }
+  const copy = [...chats];
+  copy[index] = { ...copy[index], ...nextChat };
+  return sortChats(copy);
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 function App() {
   const wsRef = useRef(null);
   const [status, setStatus] = useState("disconnected");
   const [usernameInput, setUsernameInput] = useState("");
   const [sessionUsername, setSessionUsername] = useState("");
+  const [sessionUserId, setSessionUserId] = useState("");
   const [roomTitle, setRoomTitle] = useState("");
   const [dmTarget, setDmTarget] = useState("");
   const [joinRoomId, setJoinRoomId] = useState("");
+  const [messageInput, setMessageInput] = useState("");
+  const [chats, setChats] = useState([]);
+  const [selectedChatId, setSelectedChatId] = useState("");
+  const [messagesByChat, setMessagesByChat] = useState({});
   const [errorText, setErrorText] = useState("");
 
   const sendEvent = (type, payload = {}, extra = {}) => {
@@ -21,6 +64,13 @@ function App() {
     socket.send(JSON.stringify({ type, payload, ...extra }));
     return true;
   };
+
+  const selectedChat = useMemo(
+    () => chats.find((chat) => chat.id === selectedChatId) ?? null,
+    [chats, selectedChatId],
+  );
+  const selectedMessages = useMemo(() => messagesByChat[selectedChatId] ?? [], [messagesByChat, selectedChatId]);
+  const canSendMessage = status === "connected" && Boolean(selectedChatId);
 
   const connect = (inputUsername) => {
     const username = inputUsername.trim();
@@ -47,7 +97,64 @@ function App() {
         const data = JSON.parse(event.data);
         if (data.type === "connected") {
           setSessionUsername(data.payload?.username ?? username);
+          setSessionUserId(data.payload?.user_id ?? "");
           setStatus("connected");
+          return;
+        }
+
+        if (data.type === "chat_list") {
+          const nextChats = sortChats(data.payload?.chats ?? []);
+          setChats(nextChats);
+          setSelectedChatId((prev) => {
+            if (prev && nextChats.some((chat) => chat.id === prev)) {
+              return prev;
+            }
+            return nextChats[0]?.id ?? "";
+          });
+          return;
+        }
+
+        if (data.type === "chat_upsert" && data.payload?.chat) {
+          setChats((prev) => upsertChat(prev, data.payload.chat));
+          setSelectedChatId((prev) => prev || data.payload.chat.id);
+          return;
+        }
+
+        if (data.type === "presence_update") {
+          const online = data.payload?.online_user_ids ?? [];
+          setChats((prev) =>
+            prev.map((chat) => (chat.id === data.chat_id ? { ...chat, online_user_ids: online } : chat)),
+          );
+          return;
+        }
+
+        if (data.type === "message" && data.chat_id && data.payload) {
+          const chatId = data.chat_id;
+          const message = data.payload;
+          setMessagesByChat((prev) => ({
+            ...prev,
+            [chatId]: mergeMessages(prev[chatId], [message]),
+          }));
+          setChats((prev) =>
+            sortChats(
+              prev.map((chat) =>
+                chat.id === chatId
+                  ? {
+                      ...chat,
+                      last_message_at: message.created_at,
+                      last_message_preview: message.content,
+                    }
+                  : chat,
+              ),
+            ),
+          );
+          return;
+        }
+
+        if (data.type === "error") {
+          const message = data.payload?.message ?? "Unknown server error";
+          const errorCode = data.payload?.error_code ?? "error";
+          setErrorText(`${errorCode}: ${message}`);
         }
       } catch {
         setErrorText("Failed to parse server payload");
@@ -107,6 +214,26 @@ function App() {
     setJoinRoomId("");
   };
 
+  const onLeaveRoom = () => {
+    if (!selectedChat) {
+      return;
+    }
+    sendEvent("leave_room", {}, { chat_id: selectedChat.id });
+  };
+
+  const onSendMessage = (event) => {
+    event.preventDefault();
+    if (!canSendMessage) {
+      return;
+    }
+    const content = messageInput.trim();
+    if (!content) {
+      return;
+    }
+    sendEvent("send_message", { content }, { chat_id: selectedChatId });
+    setMessageInput("");
+  };
+
   useEffect(() => {
     return () => {
       if (wsRef.current) {
@@ -125,7 +252,7 @@ function App() {
           </span>
         </div>
         <div className="session-meta">
-          <span className="session-user">{sessionUsername || "Guest"}</span>
+          <span className="session-user">{sessionUsername ? `${sessionUsername} (${sessionUserId.slice(0, 8)})` : "Guest"}</span>
           <button type="button" className="ghost-button" onClick={onReconnect}>
             Reconnect
           </button>
@@ -193,21 +320,73 @@ function App() {
           <div className="chat-list-wrap">
             <div className="chat-list-title">Chats</div>
             <div className="chat-list">
-              <div className="empty-hint">Chat list will appear here</div>
+              {chats.length === 0 ? <div className="empty-hint">No chats yet</div> : null}
+              {chats.map((chat) => {
+                const isActive = chat.id === selectedChatId;
+                return (
+                  <button
+                    type="button"
+                    className={`chat-card${isActive ? " active" : ""}`}
+                    key={chat.id}
+                    onClick={() => setSelectedChatId(chat.id)}
+                  >
+                    <div className="chat-card-top">
+                      <span className="chat-title">{chat.title}</span>
+                      <span className="chat-time">{formatTimestamp(chat.last_message_at)}</span>
+                    </div>
+                    <div className="chat-card-bottom">
+                      <span className="chat-preview">{chat.last_message_preview || "No messages yet"}</span>
+                      <span className="chat-kind">{chat.type === "dm" ? "DM" : "ROOM"}</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </aside>
 
         <section className="chat-panel">
           <div className="chat-panel-head">
-            <div className="chat-panel-title">Select chat</div>
+            <div className="chat-panel-title">{selectedChat ? selectedChat.title : "Select chat"}</div>
+            <div className="chat-panel-meta">
+              {selectedChat ? (
+                <span>
+                  Online: {selectedChat.online_user_ids?.length ?? 0} / {selectedChat.member_ids?.length ?? 0}
+                </span>
+              ) : null}
+              <button type="button" className="ghost-button" onClick={onLeaveRoom} disabled={!selectedChat}>
+                Leave
+              </button>
+            </div>
           </div>
+
           <div className="messages">
-            <div className="empty-hint">Message stream will appear here</div>
+            {selectedMessages.length === 0 ? <div className="empty-hint">No messages</div> : null}
+            {selectedMessages.map((message) => (
+              <article
+                key={message.id}
+                className={`message-item${message.kind === "system" ? " system" : ""}${
+                  message.sender_username === sessionUsername ? " own" : ""
+                }`}
+              >
+                <div className="message-meta">
+                  <span className="message-author">{message.sender_username}</span>
+                  <span className="message-time">{formatTimestamp(message.created_at)}</span>
+                </div>
+                <div className="message-content">{message.content}</div>
+              </article>
+            ))}
           </div>
-          <form className="composer" onSubmit={(event) => event.preventDefault()}>
-            <input placeholder="Message input is disabled in shell stage" disabled autoComplete="off" />
-            <button type="submit" disabled>
+
+          <form className="composer" onSubmit={onSendMessage}>
+            <input
+              value={messageInput}
+              onChange={(event) => setMessageInput(event.target.value)}
+              placeholder={canSendMessage ? "Type a message..." : "Connect and select chat"}
+              disabled={!canSendMessage}
+              autoComplete="off"
+            />
+            <button type="submit" disabled={!canSendMessage}>
               Send
             </button>
           </form>
