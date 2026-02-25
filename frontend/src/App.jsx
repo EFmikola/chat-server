@@ -8,7 +8,19 @@ function App() {
   const [status, setStatus] = useState("disconnected");
   const [usernameInput, setUsernameInput] = useState("");
   const [sessionUsername, setSessionUsername] = useState("");
+  const [roomTitle, setRoomTitle] = useState("");
+  const [dmTarget, setDmTarget] = useState("");
+  const [joinRoomId, setJoinRoomId] = useState("");
   const [errorText, setErrorText] = useState("");
+
+  const sendEvent = (type, payload = {}, extra = {}) => {
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    socket.send(JSON.stringify({ type, payload, ...extra }));
+    return true;
+  };
 
   const connect = (inputUsername) => {
     const username = inputUsername.trim();
@@ -65,6 +77,36 @@ function App() {
     connect(sessionUsername);
   };
 
+  const onCreateRoom = (event) => {
+    event.preventDefault();
+    const title = roomTitle.trim();
+    if (!title) {
+      return;
+    }
+    sendEvent("create_room", { title });
+    setRoomTitle("");
+  };
+
+  const onOpenDm = (event) => {
+    event.preventDefault();
+    const username = dmTarget.trim();
+    if (!username) {
+      return;
+    }
+    sendEvent("open_dm", { username });
+    setDmTarget("");
+  };
+
+  const onJoinRoom = (event) => {
+    event.preventDefault();
+    const chatId = joinRoomId.trim();
+    if (!chatId) {
+      return;
+    }
+    sendEvent("join_room", {}, { chat_id: chatId });
+    setJoinRoomId("");
+  };
+
   useEffect(() => {
     return () => {
       if (wsRef.current) {
@@ -103,6 +145,48 @@ function App() {
                 autoComplete="off"
               />
               <button type="submit">Connect</button>
+            </div>
+          </form>
+
+          <form className="tool-form" onSubmit={onCreateRoom}>
+            <label htmlFor="room-input">Create Room</label>
+            <div className="input-row">
+              <input
+                id="room-input"
+                value={roomTitle}
+                onChange={(event) => setRoomTitle(event.target.value)}
+                placeholder="Room title"
+                autoComplete="off"
+              />
+              <button type="submit">Create</button>
+            </div>
+          </form>
+
+          <form className="tool-form" onSubmit={onOpenDm}>
+            <label htmlFor="dm-input">Open DM</label>
+            <div className="input-row">
+              <input
+                id="dm-input"
+                value={dmTarget}
+                onChange={(event) => setDmTarget(event.target.value)}
+                placeholder="Username"
+                autoComplete="off"
+              />
+              <button type="submit">Open</button>
+            </div>
+          </form>
+
+          <form className="tool-form" onSubmit={onJoinRoom}>
+            <label htmlFor="join-room-input">Join Room by ID</label>
+            <div className="input-row">
+              <input
+                id="join-room-input"
+                value={joinRoomId}
+                onChange={(event) => setJoinRoomId(event.target.value)}
+                placeholder="chat_id"
+                autoComplete="off"
+              />
+              <button type="submit">Join</button>
             </div>
           </form>
 
