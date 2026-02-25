@@ -99,6 +99,7 @@ function App() {
           setSessionUsername(data.payload?.username ?? username);
           setSessionUserId(data.payload?.user_id ?? "");
           setStatus("connected");
+          setErrorText("");
           return;
         }
 
@@ -163,10 +164,12 @@ function App() {
 
     socket.onclose = () => {
       setStatus("disconnected");
+      setSessionUserId("");
     };
 
     socket.onerror = () => {
       setStatus("disconnected");
+      setSessionUserId("");
       setErrorText("WebSocket connection failed");
     };
   };
@@ -177,11 +180,12 @@ function App() {
   };
 
   const onReconnect = () => {
-    if (!sessionUsername) {
+    const reconnectTarget = sessionUsername.trim();
+    if (!reconnectTarget) {
       setErrorText("No previous session to reconnect");
       return;
     }
-    connect(sessionUsername);
+    connect(reconnectTarget);
   };
 
   const onCreateRoom = (event) => {
