@@ -1,8 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import ChatWorkspace from "./components/ChatWorkspace";
+import LoginScreen from "./components/LoginScreen";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 const HISTORY_LIMIT = 50;
+
+const ERROR_TRANSLATIONS = {
+  "Unknown server error": "Неизвестная ошибка сервера",
+  "Field 'payload.username' is required": "Поле имени пользователя обязательно",
+  "Username cannot be empty": "Имя пользователя не может быть пустым",
+  "Username is too long": "Имя пользователя слишком длинное",
+  "Field 'payload.title' is required": "Нужно указать название комнаты",
+  "Room title cannot be empty": "Название комнаты не может быть пустым",
+  "Room title is too long": "Название комнаты слишком длинное",
+  "Join operation is available only for rooms": "Войти можно только в комнату",
+  "Leave operation is available only for rooms": "Покинуть можно только комнату",
+  "Target username cannot be empty": "Нужно указать имя собеседника",
+  "Field 'payload.content' is required": "Поле сообщения обязательно",
+  "Message cannot be empty": "Сообщение не может быть пустым",
+  "Field 'chat_id' is required": "Нужно указать ID чата",
+  "Unknown user": "Пользователь не найден",
+};
 
 function sortChats(chats) {
   return [...chats].sort((left, right) => {
@@ -41,22 +60,40 @@ function formatTimestamp(value) {
   if (!value) {
     return "";
   }
+
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return "";
   }
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  return date.toLocaleTimeString("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getStatusLabel(status) {
+  if (status === "connected") {
+    return "В сети";
+  }
+  if (status === "connecting") {
+    return "Подключение";
+  }
+  return "Не в сети";
 }
 
 function App() {
   const wsRef = useRef(null);
   const messagesRef = useRef(null);
   const shouldScrollBottomRef = useRef(true);
+  const connectionIdRef = useRef(0);
+  const copyTimeoutRef = useRef(null);
 
   const [status, setStatus] = useState("disconnected");
   const [usernameInput, setUsernameInput] = useState("");
   const [sessionUsername, setSessionUsername] = useState("");
   const [sessionUserId, setSessionUserId] = useState("");
+  const [hasRecoverableSession, setHasRecoverableSession] = useState(false);
 
   const [chats, setChats] = useState([]);
   const [selectedChatId, setSelectedChatId] = useState("");
@@ -69,6 +106,7 @@ function App() {
   const [joinRoomId, setJoinRoomId] = useState("");
   const [messageInput, setMessageInput] = useState("");
   const [errorText, setErrorText] = useState("");
+  const [copyFeedbackKey, setCopyFeedbackKey] = useState("");
 
   const selectedChat = useMemo(
     () => chats.find((chat) => chat.id === selectedChatId) ?? null,
@@ -79,51 +117,69 @@ function App() {
     [messagesByChat, selectedChatId],
   );
   const canSendMessage = status === "connected" && Boolean(selectedChatId);
+  const canLeaveRoom = Boolean(selectedChat && selectedChat.type === "room");
+
+  const clearCopyFeedback = useCallback(() => {
+    if (copyTimeoutRef.current) {
+      window.clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = null;
+    }
+    setCopyFeedbackKey("");
+  }, []);
+
+  const translateUiError = useCallback((rawMessage) => {
+    if (!rawMessage) {
+      return "Неизвестная ошибка сервера";
+    }
+
+    if (ERROR_TRANSLATIONS[rawMessage]) {
+      return ERROR_TRANSLATIONS[rawMessage];
+    }
+
+    return `Ошибка: ${rawMessage}`;
+  }, []);
+
+  const resetChatState = useCallback(() => {
+    setChats([]);
+    setSelectedChatId("");
+    setMessagesByChat({});
+    setHasMoreByChat({});
+    setHistoryLoadingByChat({});
+    setRoomTitle("");
+    setDmTarget("");
+    setJoinRoomId("");
+    setMessageInput("");
+    shouldScrollBottomRef.current = true;
+  }, []);
+
+  const resetSessionState = useCallback(
+    ({ clearUsernameInput = false } = {}) => {
+      setSessionUsername("");
+      setSessionUserId("");
+      setHasRecoverableSession(false);
+      clearCopyFeedback();
+      if (clearUsernameInput) {
+        setUsernameInput("");
+      }
+    },
+    [clearCopyFeedback],
+  );
 
   const sendEvent = useCallback((type, payload = {}, extra = {}) => {
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
-    const event = {
-      type,
-      payload,
-      ...extra,
-    };
-    socket.send(JSON.stringify(event));
-    return true;
-  }, []);
 
-  const handleChatUpsert = useCallback((chat) => {
-    setChats((prev) => upsertChat(prev, chat));
-    setSelectedChatId((prev) => prev || chat.id);
-  }, []);
-
-  const handleIncomingMessage = useCallback((event) => {
-    const chatId = event.chat_id;
-    if (!chatId || !event.payload) {
-      return;
-    }
-    const incoming = event.payload;
-    setMessagesByChat((prev) => ({
-      ...prev,
-      [chatId]: mergeMessages(prev[chatId], [incoming]),
-    }));
-
-    setChats((prevChats) =>
-      sortChats(
-        prevChats.map((chat) => {
-          if (chat.id !== chatId) {
-            return chat;
-          }
-          return {
-            ...chat,
-            last_message_at: incoming.created_at,
-            last_message_preview: incoming.content,
-          };
-        }),
-      ),
+    socket.send(
+      JSON.stringify({
+        type,
+        payload,
+        ...extra,
+      }),
     );
+
+    return true;
   }, []);
 
   const requestHistory = useCallback(
@@ -131,6 +187,7 @@ function App() {
       if (!chatId || status !== "connected") {
         return;
       }
+
       setHistoryLoadingByChat((prev) => ({ ...prev, [chatId]: true }));
       sendEvent("history_request", {}, { chat_id: chatId, before, limit: HISTORY_LIMIT });
     },
@@ -143,16 +200,44 @@ function App() {
       if (!chatId) {
         return;
       }
-      if (messagesByChat[chatId]?.length) {
-        return;
-      }
-      if (historyLoadingByChat[chatId]) {
+      if (messagesByChat[chatId]?.length || historyLoadingByChat[chatId]) {
         return;
       }
       requestHistory(chatId, undefined);
     },
     [historyLoadingByChat, messagesByChat, requestHistory],
   );
+
+  const handleIncomingMessage = useCallback((event) => {
+    const chatId = event.chat_id;
+    if (!chatId || !event.payload) {
+      return;
+    }
+
+    const incoming = event.payload;
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [chatId]: mergeMessages(prev[chatId], [incoming]),
+    }));
+    setChats((prevChats) =>
+      sortChats(
+        prevChats.map((chat) =>
+          chat.id === chatId
+            ? {
+                ...chat,
+                last_message_at: incoming.created_at,
+                last_message_preview: incoming.content,
+              }
+            : chat,
+        ),
+      ),
+    );
+  }, []);
+
+  const handleChatUpsert = useCallback((chat) => {
+    setChats((prev) => upsertChat(prev, chat));
+    setSelectedChatId((prev) => prev || chat.id);
+  }, []);
 
   const handleServerEvent = useCallback(
     (event) => {
@@ -161,9 +246,12 @@ function App() {
       }
 
       if (event.type === "connected") {
+        const nextUsername = event.payload?.username ?? "";
         setStatus("connected");
-        setSessionUsername(event.payload?.username ?? "");
+        setSessionUsername(nextUsername);
         setSessionUserId(event.payload?.user_id ?? "");
+        setUsernameInput(nextUsername);
+        setHasRecoverableSession(false);
         setErrorText("");
         return;
       }
@@ -171,24 +259,23 @@ function App() {
       if (event.type === "chat_list") {
         const nextChats = sortChats(event.payload?.chats ?? []);
         setChats(nextChats);
-        if (nextChats.length > 0) {
-          const keepSelected =
-            selectedChatId && nextChats.some((chat) => chat.id === selectedChatId)
-              ? selectedChatId
-              : nextChats[0].id;
-          selectChat(keepSelected);
-        } else {
+        if (nextChats.length === 0) {
           setSelectedChatId("");
+          return;
         }
+
+        const nextSelectedId =
+          selectedChatId && nextChats.some((chat) => chat.id === selectedChatId)
+            ? selectedChatId
+            : nextChats[0].id;
+        setSelectedChatId(nextSelectedId);
+        requestHistory(nextSelectedId, undefined);
         return;
       }
 
       if (event.type === "chat_upsert") {
         if (event.payload?.chat) {
           handleChatUpsert(event.payload.chat);
-          if (!selectedChatId) {
-            selectChat(event.payload.chat.id);
-          }
         }
         return;
       }
@@ -223,138 +310,219 @@ function App() {
       }
 
       if (event.type === "error") {
-        const message = event.payload?.message ?? "Unknown server error";
-        const errorCode = event.payload?.error_code ?? "error";
-        setErrorText(`${errorCode}: ${message}`);
+        const rawMessage = event.payload?.message ?? "Unknown server error";
+        setErrorText(translateUiError(rawMessage));
       }
     },
-    [handleChatUpsert, handleIncomingMessage, selectChat, selectedChatId],
+    [handleChatUpsert, handleIncomingMessage, requestHistory, selectedChatId, translateUiError],
   );
 
   const connect = useCallback(
     (targetUsername) => {
       const username = targetUsername.trim();
       if (!username) {
-        setErrorText("Username is required");
+        setErrorText("Введите имя пользователя");
         return;
       }
 
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-
-      setStatus("connecting");
-      setErrorText("");
+      const previousSocket = wsRef.current;
+      const nextConnectionId = connectionIdRef.current + 1;
       const socket = new WebSocket(WS_URL);
+
+      connectionIdRef.current = nextConnectionId;
       wsRef.current = socket;
 
+      clearCopyFeedback();
+      resetChatState();
+      setStatus("connecting");
+      setUsernameInput(username);
+      setErrorText("");
+
+      if (previousSocket && previousSocket !== socket) {
+        previousSocket.close();
+      }
+
       socket.onopen = () => {
+        if (wsRef.current !== socket || connectionIdRef.current !== nextConnectionId) {
+          return;
+        }
+
         socket.send(JSON.stringify({ type: "connect", payload: { username } }));
       };
 
       socket.onmessage = (messageEvent) => {
+        if (wsRef.current !== socket || connectionIdRef.current !== nextConnectionId) {
+          return;
+        }
+
         try {
           const parsed = JSON.parse(messageEvent.data);
           handleServerEvent(parsed);
         } catch {
-          setErrorText("Received invalid server payload");
+          setErrorText("Получен некорректный ответ сервера");
         }
       };
 
-      socket.onclose = () => {
-        setStatus("disconnected");
+      socket.onerror = () => {
+        if (wsRef.current !== socket || connectionIdRef.current !== nextConnectionId) {
+          return;
+        }
+
+        setErrorText("Не удалось подключиться к серверу");
       };
 
-      socket.onerror = () => {
+      socket.onclose = () => {
+        if (wsRef.current !== socket || connectionIdRef.current !== nextConnectionId) {
+          return;
+        }
+
+        wsRef.current = null;
+        resetChatState();
+        clearCopyFeedback();
         setStatus("disconnected");
-        setErrorText("WebSocket connection failed");
+        setSessionUserId("");
+        setHasRecoverableSession(Boolean(username));
+        setUsernameInput(username);
       };
     },
-    [handleServerEvent],
+    [clearCopyFeedback, handleServerEvent, resetChatState],
+  );
+
+  const logoutSession = useCallback(() => {
+    const socket = wsRef.current;
+    wsRef.current = null;
+    connectionIdRef.current += 1;
+    if (socket) {
+      socket.close();
+    }
+
+    setStatus("disconnected");
+    resetChatState();
+    resetSessionState({ clearUsernameInput: true });
+    setErrorText("");
+  }, [resetChatState, resetSessionState]);
+
+  const copyToClipboard = useCallback(
+    async (value) => {
+      if (!value || !navigator.clipboard?.writeText) {
+        setErrorText("Не удалось скопировать значение");
+        return;
+      }
+
+      try {
+        await navigator.clipboard.writeText(value);
+        clearCopyFeedback();
+        setCopyFeedbackKey(value);
+        copyTimeoutRef.current = window.setTimeout(() => {
+          setCopyFeedbackKey("");
+          copyTimeoutRef.current = null;
+        }, 1500);
+      } catch {
+        setErrorText("Не удалось скопировать значение");
+      }
+    },
+    [clearCopyFeedback],
   );
 
   useEffect(() => {
     const container = messagesRef.current;
-    if (!container) {
+    if (!container || !selectedChatId) {
       return;
     }
+
     if (shouldScrollBottomRef.current) {
       container.scrollTop = container.scrollHeight;
     }
-  }, [selectedMessages, selectedChatId]);
+  }, [selectedChatId, selectedMessages]);
 
   useEffect(() => {
     return () => {
+      clearCopyFeedback();
       if (wsRef.current) {
-        wsRef.current.close();
+        const socket = wsRef.current;
+        wsRef.current = null;
+        socket.close();
       }
     };
-  }, []);
+  }, [clearCopyFeedback]);
 
-  const onConnectSubmit = (event) => {
-    event.preventDefault();
-    connect(usernameInput);
-  };
+  const onConnectSubmit = useCallback(
+    (event) => {
+      event.preventDefault();
+      connect(usernameInput || sessionUsername);
+    },
+    [connect, sessionUsername, usernameInput],
+  );
 
-  const onReconnect = () => {
-    if (!sessionUsername) {
-      setErrorText("No previous session to reconnect");
-      return;
-    }
-    connect(sessionUsername);
-  };
+  const onCreateRoom = useCallback(
+    (event) => {
+      event.preventDefault();
+      const title = roomTitle.trim();
+      if (!title) {
+        setErrorText("Нужно указать название комнаты");
+        return;
+      }
+      sendEvent("create_room", { title });
+      setRoomTitle("");
+    },
+    [roomTitle, sendEvent],
+  );
 
-  const onCreateRoom = (event) => {
-    event.preventDefault();
-    const title = roomTitle.trim();
-    if (!title) {
-      return;
-    }
-    sendEvent("create_room", { title });
-    setRoomTitle("");
-  };
+  const onOpenDm = useCallback(
+    (event) => {
+      event.preventDefault();
+      const username = dmTarget.trim();
+      if (!username) {
+        setErrorText("Нужно указать имя собеседника");
+        return;
+      }
+      sendEvent("open_dm", { username });
+      setDmTarget("");
+    },
+    [dmTarget, sendEvent],
+  );
 
-  const onOpenDm = (event) => {
-    event.preventDefault();
-    const username = dmTarget.trim();
-    if (!username) {
-      return;
-    }
-    sendEvent("open_dm", { username });
-    setDmTarget("");
-  };
+  const onJoinRoom = useCallback(
+    (event) => {
+      event.preventDefault();
+      const chatId = joinRoomId.trim();
+      if (!chatId) {
+        setErrorText("Нужно указать ID чата");
+        return;
+      }
+      sendEvent("join_room", {}, { chat_id: chatId });
+      setJoinRoomId("");
+    },
+    [joinRoomId, sendEvent],
+  );
 
-  const onJoinRoom = (event) => {
-    event.preventDefault();
-    const chatId = joinRoomId.trim();
-    if (!chatId) {
-      return;
-    }
-    sendEvent("join_room", {}, { chat_id: chatId });
-    setJoinRoomId("");
-  };
-
-  const onLeaveRoom = () => {
-    if (!selectedChat) {
+  const onLeaveRoom = useCallback(() => {
+    if (!selectedChat || selectedChat.type !== "room") {
       return;
     }
     sendEvent("leave_room", {}, { chat_id: selectedChat.id });
-  };
+  }, [selectedChat, sendEvent]);
 
-  const onSendMessage = (event) => {
-    event.preventDefault();
-    if (!canSendMessage) {
-      return;
-    }
-    const content = messageInput.trim();
-    if (!content) {
-      return;
-    }
-    sendEvent("send_message", { content }, { chat_id: selectedChatId });
-    setMessageInput("");
-  };
+  const onSendMessage = useCallback(
+    (event) => {
+      event.preventDefault();
+      if (!canSendMessage) {
+        return;
+      }
 
-  const onMessagesScroll = () => {
+      const content = messageInput.trim();
+      if (!content) {
+        setErrorText("Сообщение не может быть пустым");
+        return;
+      }
+
+      sendEvent("send_message", { content }, { chat_id: selectedChatId });
+      setMessageInput("");
+    },
+    [canSendMessage, messageInput, selectedChatId, sendEvent],
+  );
+
+  const onMessagesScroll = useCallback(() => {
     const container = messagesRef.current;
     if (!container) {
       return;
@@ -378,176 +546,59 @@ function App() {
     if (!oldestMessage) {
       return;
     }
-    const before = oldestMessage?.created_at;
-    requestHistory(selectedChatId, before);
-  };
+
+    requestHistory(selectedChatId, oldestMessage.created_at);
+  }, [hasMoreByChat, historyLoadingByChat, requestHistory, selectedChatId, selectedMessages]);
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <div className="status-line">
-          <span className={`status-dot status-${status}`} />
-          <span className="status-text">
-            {status === "connected" ? "Connected" : status === "connecting" ? "Connecting" : "Disconnected"}
-          </span>
-        </div>
+      {status === "connected" ? (
+        <ChatWorkspace
+          status={status}
+          statusLabel={getStatusLabel(status)}
+          sessionUsername={sessionUsername}
+          sessionUserId={sessionUserId}
+          copyFeedbackKey={copyFeedbackKey}
+          onCopy={copyToClipboard}
+          onLogout={logoutSession}
+          roomTitle={roomTitle}
+          onRoomTitleChange={setRoomTitle}
+          onCreateRoom={onCreateRoom}
+          dmTarget={dmTarget}
+          onDmTargetChange={setDmTarget}
+          onOpenDm={onOpenDm}
+          joinRoomId={joinRoomId}
+          onJoinRoomIdChange={setJoinRoomId}
+          onJoinRoom={onJoinRoom}
+          chats={chats}
+          selectedChat={selectedChat}
+          selectedChatId={selectedChatId}
+          onSelectChat={selectChat}
+          formatTimestamp={formatTimestamp}
+          onLeaveRoom={onLeaveRoom}
+          canLeaveRoom={canLeaveRoom}
+          messagesRef={messagesRef}
+          onMessagesScroll={onMessagesScroll}
+          historyLoading={Boolean(selectedChatId && historyLoadingByChat[selectedChatId])}
+          selectedMessages={selectedMessages}
+          messageInput={messageInput}
+          onMessageInputChange={setMessageInput}
+          onSendMessage={onSendMessage}
+          canSendMessage={canSendMessage}
+        />
+      ) : (
+        <LoginScreen
+          usernameInput={usernameInput}
+          status={status}
+          statusLabel={getStatusLabel(status)}
+          errorText={errorText}
+          hasRecoverableSession={hasRecoverableSession}
+          onUsernameChange={setUsernameInput}
+          onSubmit={onConnectSubmit}
+        />
+      )}
 
-        <div className="session-meta">
-          <span className="session-user">
-            {sessionUsername ? `${sessionUsername}${sessionUserId ? ` (${sessionUserId.slice(0, 8)})` : ""}` : "Guest"}
-          </span>
-          <button type="button" className="ghost-button" onClick={onReconnect}>
-            Reconnect
-          </button>
-        </div>
-      </header>
-
-      <main className="app-main">
-        <aside className="sidebar">
-          <form className="connect-form" onSubmit={onConnectSubmit}>
-            <label htmlFor="username-input">Username</label>
-            <div className="input-row">
-              <input
-                id="username-input"
-                value={usernameInput}
-                onChange={(event) => setUsernameInput(event.target.value)}
-                placeholder="Enter username"
-                autoComplete="off"
-              />
-              <button type="submit">Connect</button>
-            </div>
-          </form>
-
-          <form className="tool-form" onSubmit={onCreateRoom}>
-            <label htmlFor="room-input">Create Room</label>
-            <div className="input-row">
-              <input
-                id="room-input"
-                value={roomTitle}
-                onChange={(event) => setRoomTitle(event.target.value)}
-                placeholder="Room title"
-                autoComplete="off"
-              />
-              <button type="submit">Create</button>
-            </div>
-          </form>
-
-          <form className="tool-form" onSubmit={onOpenDm}>
-            <label htmlFor="dm-input">Open DM</label>
-            <div className="input-row">
-              <input
-                id="dm-input"
-                value={dmTarget}
-                onChange={(event) => setDmTarget(event.target.value)}
-                placeholder="Username"
-                autoComplete="off"
-              />
-              <button type="submit">Open</button>
-            </div>
-          </form>
-
-          <form className="tool-form" onSubmit={onJoinRoom}>
-            <label htmlFor="join-room-input">Join Room by ID</label>
-            <div className="input-row">
-              <input
-                id="join-room-input"
-                value={joinRoomId}
-                onChange={(event) => setJoinRoomId(event.target.value)}
-                placeholder="chat_id"
-                autoComplete="off"
-              />
-              <button type="submit">Join</button>
-            </div>
-          </form>
-
-          <div className="chat-list-wrap">
-            <div className="chat-list-title">Chats</div>
-            <div className="chat-list">
-              {chats.length === 0 ? <div className="empty-hint">No chats yet</div> : null}
-              {chats.map((chat) => {
-                const isActive = chat.id === selectedChatId;
-                return (
-                  <button
-                    type="button"
-                    className={`chat-card${isActive ? " active" : ""}`}
-                    key={chat.id}
-                    onClick={() => selectChat(chat.id)}
-                  >
-                    <div className="chat-card-top">
-                      <span className="chat-title">{chat.title}</span>
-                      <span className="chat-time">{formatTimestamp(chat.last_message_at)}</span>
-                    </div>
-                    <div className="chat-card-bottom">
-                      <span className="chat-preview">{chat.last_message_preview || "No messages yet"}</span>
-                      <span className="chat-kind">{chat.type === "dm" ? "DM" : "ROOM"}</span>
-                    </div>
-                    <div className="chat-card-id" title={chat.id}>
-                      ID: {chat.id}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </aside>
-
-        <section className="chat-panel">
-          <div className="chat-panel-head">
-            <div className="chat-panel-title-wrap">
-              <div className="chat-panel-title">{selectedChat ? selectedChat.title : "Select chat"}</div>
-              {selectedChat ? (
-                <div className="chat-panel-id" title={selectedChat.id}>
-                  ID: {selectedChat.id}
-                </div>
-              ) : null}
-            </div>
-            <div className="chat-panel-meta">
-              {selectedChat ? (
-                <span>
-                  Online: {selectedChat.online_user_ids?.length ?? 0} / {selectedChat.member_ids?.length ?? 0}
-                </span>
-              ) : null}
-              <button type="button" className="ghost-button" onClick={onLeaveRoom} disabled={!selectedChat}>
-                Leave
-              </button>
-            </div>
-          </div>
-
-          <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
-            {historyLoadingByChat[selectedChatId] ? <div className="history-loader">Loading history...</div> : null}
-            {selectedMessages.length === 0 ? <div className="empty-hint">No messages</div> : null}
-            {selectedMessages.map((message) => (
-              <article
-                key={message.id}
-                className={`message-item${message.kind === "system" ? " system" : ""}${
-                  message.sender_username === sessionUsername ? " own" : ""
-                }`}
-              >
-                <div className="message-meta">
-                  <span className="message-author">{message.sender_username}</span>
-                  <span className="message-time">{formatTimestamp(message.created_at)}</span>
-                </div>
-                <div className="message-content">{message.content}</div>
-              </article>
-            ))}
-          </div>
-
-          <form className="composer" onSubmit={onSendMessage}>
-            <input
-              value={messageInput}
-              onChange={(event) => setMessageInput(event.target.value)}
-              placeholder={canSendMessage ? "Type a message..." : "Connect and select chat"}
-              disabled={!canSendMessage}
-              autoComplete="off"
-            />
-            <button type="submit" disabled={!canSendMessage}>
-              Send
-            </button>
-          </form>
-        </section>
-      </main>
-
-      {errorText ? <div className="error-banner">{errorText}</div> : null}
+      {errorText && status === "connected" ? <div className="error-banner">{errorText}</div> : null}
     </div>
   );
 }
