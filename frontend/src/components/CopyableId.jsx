@@ -1,7 +1,7 @@
 import IconButton from "./IconButton";
 import { CheckIcon, CopyIcon } from "../ui/icons";
 
-function CopyableId({ value, shortValue, label, copyStateKey, onCopy }) {
+function CopyableId({ value, shortValue, label, copyStateKey, onCopy, compact = false }) {
   if (!value) {
     return null;
   }
@@ -9,7 +9,7 @@ function CopyableId({ value, shortValue, label, copyStateKey, onCopy }) {
   const isCopied = copyStateKey === value;
 
   return (
-    <div className="copy-chip" title={value}>
+    <div className={`copy-chip${compact ? " copy-chip-compact" : ""}`} title={value}>
       <div className="copy-chip-copy">
         <span className="copy-chip-label">{label}</span>
         <span className="copy-chip-value">{shortValue ?? value}</span>

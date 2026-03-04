@@ -5,6 +5,7 @@ import LoginScreen from "./components/LoginScreen";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 const HISTORY_LIMIT = 50;
+const SEARCH_LIMIT = 20;
 
 const ERROR_TRANSLATIONS = {
   "Unknown server error": "Неизвестная ошибка сервера",
@@ -21,6 +22,14 @@ const ERROR_TRANSLATIONS = {
   "Message cannot be empty": "Сообщение не может быть пустым",
   "Field 'chat_id' is required": "Нужно указать ID чата",
   "Unknown user": "Пользователь не найден",
+  "Field 'payload.query' is required": "Нужно указать строку поиска",
+  "Field 'payload.limit' must be an integer": "Лимит поиска должен быть числом",
+  "Field 'payload.limit' must be in range 1..20": "Лимит поиска должен быть в диапазоне от 1 до 20",
+  "Please send 'connect' event first": "Сначала нужно подключиться к серверу",
+  "Session is already connected": "Сессия уже подключена",
+  "Cannot open DM with yourself": "Нельзя открыть личный чат с самим собой",
+  "User is not a member of this chat": "Вы не состоите в этом чате",
+  "User is not a member of this room": "Вы не состоите в этой комнате",
 };
 
 function sortChats(chats) {
@@ -56,6 +65,34 @@ function upsertChat(chats, nextChat) {
   return sortChats(copy);
 }
 
+function syncOpenSearchResult(result, chat) {
+  if (result.action !== "open" || result.chat_id !== chat.id) {
+    return result;
+  }
+
+  return {
+    ...result,
+    chat_type: chat.type,
+    subtitle: chat.type === "dm" ? "Личный чат" : "Группа",
+    is_member: true,
+    last_message_at: chat.last_message_at ?? null,
+    last_message_preview: chat.last_message_preview ?? "",
+  };
+}
+
+function promoteSearchResultToOpen(result, chat) {
+  return {
+    ...result,
+    action: "open",
+    chat_id: chat.id,
+    chat_type: chat.type,
+    is_member: true,
+    subtitle: chat.type === "dm" ? "Личный чат" : "Группа",
+    last_message_at: chat.last_message_at ?? null,
+    last_message_preview: chat.last_message_preview ?? "",
+  };
+}
+
 function formatTimestamp(value) {
   if (!value) {
     return "";
@@ -82,12 +119,28 @@ function getStatusLabel(status) {
   return "Не в сети";
 }
 
+function toPreviewSelection(result) {
+  return {
+    resultId: result.result_id,
+    kind: result.kind,
+    chatType: result.chat_type,
+    action: result.action,
+    chatId: result.chat_id,
+    userId: result.user_id,
+    username: result.username,
+    title: result.title,
+    subtitle: result.subtitle,
+    memberCount: result.member_count,
+  };
+}
+
 function App() {
   const wsRef = useRef(null);
   const messagesRef = useRef(null);
   const shouldScrollBottomRef = useRef(true);
   const connectionIdRef = useRef(0);
   const copyTimeoutRef = useRef(null);
+  const handleServerEventRef = useRef(() => {});
 
   const [status, setStatus] = useState("disconnected");
   const [usernameInput, setUsernameInput] = useState("");
@@ -102,11 +155,17 @@ function App() {
   const [historyLoadingByChat, setHistoryLoadingByChat] = useState({});
 
   const [roomTitle, setRoomTitle] = useState("");
-  const [dmTarget, setDmTarget] = useState("");
-  const [joinRoomId, setJoinRoomId] = useState("");
   const [messageInput, setMessageInput] = useState("");
   const [errorText, setErrorText] = useState("");
   const [copyFeedbackKey, setCopyFeedbackKey] = useState("");
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchStatus, setSearchStatus] = useState("idle");
+  const [searchOpenCreateGroup, setSearchOpenCreateGroup] = useState(false);
+  const [pendingPreview, setPendingPreview] = useState(null);
+  const [pendingPreviewConnecting, setPendingPreviewConnecting] = useState(false);
+  const [createGroupPendingTitle, setCreateGroupPendingTitle] = useState("");
 
   const selectedChat = useMemo(
     () => chats.find((chat) => chat.id === selectedChatId) ?? null,
@@ -116,8 +175,10 @@ function App() {
     () => messagesByChat[selectedChatId] ?? [],
     [messagesByChat, selectedChatId],
   );
-  const canSendMessage = status === "connected" && Boolean(selectedChatId);
-  const canLeaveRoom = Boolean(selectedChat && selectedChat.type === "room");
+  const trimmedSearchQuery = searchQuery.trim();
+  const createGroupSubmitting = Boolean(createGroupPendingTitle);
+  const canSendMessage = status === "connected" && Boolean(selectedChatId) && !pendingPreview;
+  const canLeaveRoom = Boolean(!pendingPreview && selectedChat && selectedChat.type === "room");
 
   const clearCopyFeedback = useCallback(() => {
     if (copyTimeoutRef.current) {
@@ -146,9 +207,14 @@ function App() {
     setHasMoreByChat({});
     setHistoryLoadingByChat({});
     setRoomTitle("");
-    setDmTarget("");
-    setJoinRoomId("");
     setMessageInput("");
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchStatus("idle");
+    setSearchOpenCreateGroup(false);
+    setPendingPreview(null);
+    setPendingPreviewConnecting(false);
+    setCreateGroupPendingTitle("");
     shouldScrollBottomRef.current = true;
   }, []);
 
@@ -196,6 +262,8 @@ function App() {
 
   const selectChat = useCallback(
     (chatId) => {
+      setPendingPreview(null);
+      setPendingPreviewConnecting(false);
       setSelectedChatId(chatId);
       if (!chatId) {
         return;
@@ -236,7 +304,6 @@ function App() {
 
   const handleChatUpsert = useCallback((chat) => {
     setChats((prev) => upsertChat(prev, chat));
-    setSelectedChatId((prev) => prev || chat.id);
   }, []);
 
   const handleServerEvent = useCallback(
@@ -269,13 +336,74 @@ function App() {
             ? selectedChatId
             : nextChats[0].id;
         setSelectedChatId(nextSelectedId);
-        requestHistory(nextSelectedId, undefined);
+        if (!pendingPreview && !messagesByChat[nextSelectedId]?.length && !historyLoadingByChat[nextSelectedId]) {
+          requestHistory(nextSelectedId, undefined);
+        }
+        return;
+      }
+
+      if (event.type === "search_results") {
+        const responseQuery = (event.payload?.query ?? "").trim();
+        if (!trimmedSearchQuery || responseQuery !== trimmedSearchQuery) {
+          return;
+        }
+        setSearchResults(event.payload?.results ?? []);
+        setSearchStatus("ready");
         return;
       }
 
       if (event.type === "chat_upsert") {
-        if (event.payload?.chat) {
-          handleChatUpsert(event.payload.chat);
+        const nextChat = event.payload?.chat;
+        if (!nextChat) {
+          return;
+        }
+
+        handleChatUpsert(nextChat);
+        setSearchResults((prev) => prev.map((result) => syncOpenSearchResult(result, nextChat)));
+
+        if (createGroupPendingTitle && nextChat.type === "room" && nextChat.title === createGroupPendingTitle) {
+          setCreateGroupPendingTitle("");
+          setSearchOpenCreateGroup(false);
+          setRoomTitle("");
+          setSearchQuery("");
+          setSearchResults([]);
+          setSearchStatus("idle");
+          selectChat(nextChat.id);
+          return;
+        }
+
+        if (pendingPreview) {
+          if (pendingPreview.action === "join_room" && pendingPreview.chatId === nextChat.id) {
+            setSearchResults((prev) =>
+              prev.map((result) =>
+                result.result_id === pendingPreview.resultId ? promoteSearchResultToOpen(result, nextChat) : result,
+              ),
+            );
+            setPendingPreview(null);
+            setPendingPreviewConnecting(false);
+            selectChat(nextChat.id);
+            return;
+          }
+
+          if (
+            pendingPreview.action === "open_dm" &&
+            nextChat.type === "dm" &&
+            nextChat.members?.some((member) => member.user_id === pendingPreview.userId)
+          ) {
+            setSearchResults((prev) =>
+              prev.map((result) =>
+                result.result_id === pendingPreview.resultId ? promoteSearchResultToOpen(result, nextChat) : result,
+              ),
+            );
+            setPendingPreview(null);
+            setPendingPreviewConnecting(false);
+            selectChat(nextChat.id);
+            return;
+          }
+        }
+
+        if (!selectedChatId) {
+          selectChat(nextChat.id);
         }
         return;
       }
@@ -310,12 +438,36 @@ function App() {
       }
 
       if (event.type === "error") {
+        if (pendingPreviewConnecting) {
+          setPendingPreviewConnecting(false);
+        }
+        if (createGroupSubmitting) {
+          setCreateGroupPendingTitle("");
+        }
         const rawMessage = event.payload?.message ?? "Unknown server error";
         setErrorText(translateUiError(rawMessage));
       }
     },
-    [handleChatUpsert, handleIncomingMessage, requestHistory, selectedChatId, translateUiError],
+    [
+      createGroupPendingTitle,
+      createGroupSubmitting,
+      handleChatUpsert,
+      handleIncomingMessage,
+      historyLoadingByChat,
+      messagesByChat,
+      pendingPreview,
+      pendingPreviewConnecting,
+      requestHistory,
+      selectChat,
+      selectedChatId,
+      translateUiError,
+      trimmedSearchQuery,
+    ],
   );
+
+  useEffect(() => {
+    handleServerEventRef.current = handleServerEvent;
+  }, [handleServerEvent]);
 
   const connect = useCallback(
     (targetUsername) => {
@@ -357,7 +509,7 @@ function App() {
 
         try {
           const parsed = JSON.parse(messageEvent.data);
-          handleServerEvent(parsed);
+          handleServerEventRef.current(parsed);
         } catch {
           setErrorText("Получен некорректный ответ сервера");
         }
@@ -385,7 +537,7 @@ function App() {
         setUsernameInput(username);
       };
     },
-    [clearCopyFeedback, handleServerEvent, resetChatState],
+    [clearCopyFeedback, resetChatState],
   );
 
   const logoutSession = useCallback(() => {
@@ -426,14 +578,35 @@ function App() {
 
   useEffect(() => {
     const container = messagesRef.current;
-    if (!container || !selectedChatId) {
+    if (!container || !selectedChatId || pendingPreview) {
       return;
     }
 
     if (shouldScrollBottomRef.current) {
       container.scrollTop = container.scrollHeight;
     }
-  }, [selectedChatId, selectedMessages]);
+  }, [pendingPreview, selectedChatId, selectedMessages]);
+
+  useEffect(() => {
+    if (status !== "connected") {
+      return undefined;
+    }
+
+    if (!trimmedSearchQuery) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      const sent = sendEvent("search_catalog", { query: trimmedSearchQuery, limit: SEARCH_LIMIT });
+      if (!sent) {
+        setSearchStatus("ready");
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [sendEvent, status, trimmedSearchQuery]);
 
   useEffect(() => {
     return () => {
@@ -454,6 +627,32 @@ function App() {
     [connect, sessionUsername, usernameInput],
   );
 
+  const onSearchQueryChange = useCallback((value) => {
+    setSearchQuery(value);
+    if (!value.trim()) {
+      setSearchResults([]);
+      setSearchStatus("idle");
+      return;
+    }
+    setSearchStatus("loading");
+  }, []);
+
+  const onToggleCreateGroup = useCallback(() => {
+    setSearchOpenCreateGroup((prev) => {
+      if (prev) {
+        setRoomTitle("");
+        setCreateGroupPendingTitle("");
+      }
+      return !prev;
+    });
+  }, []);
+
+  const onCancelCreateGroup = useCallback(() => {
+    setSearchOpenCreateGroup(false);
+    setRoomTitle("");
+    setCreateGroupPendingTitle("");
+  }, []);
+
   const onCreateRoom = useCallback(
     (event) => {
       event.preventDefault();
@@ -462,39 +661,52 @@ function App() {
         setErrorText("Нужно указать название комнаты");
         return;
       }
-      sendEvent("create_room", { title });
-      setRoomTitle("");
+
+      const sent = sendEvent("create_room", { title });
+      if (!sent) {
+        setErrorText("Не удалось отправить запрос на создание группы");
+        return;
+      }
+
+      setErrorText("");
+      setCreateGroupPendingTitle(title);
     },
     [roomTitle, sendEvent],
   );
 
-  const onOpenDm = useCallback(
-    (event) => {
-      event.preventDefault();
-      const username = dmTarget.trim();
-      if (!username) {
-        setErrorText("Нужно указать имя собеседника");
+  const onSelectSearchResult = useCallback(
+    (result) => {
+      if (result.action === "open" && result.chat_id) {
+        selectChat(result.chat_id);
         return;
       }
-      sendEvent("open_dm", { username });
-      setDmTarget("");
+
+      setPendingPreview(toPreviewSelection(result));
+      setPendingPreviewConnecting(false);
     },
-    [dmTarget, sendEvent],
+    [selectChat],
   );
 
-  const onJoinRoom = useCallback(
-    (event) => {
-      event.preventDefault();
-      const chatId = joinRoomId.trim();
-      if (!chatId) {
-        setErrorText("Нужно указать ID чата");
-        return;
-      }
-      sendEvent("join_room", {}, { chat_id: chatId });
-      setJoinRoomId("");
-    },
-    [joinRoomId, sendEvent],
-  );
+  const onConnectPendingPreview = useCallback(() => {
+    if (!pendingPreview) {
+      return;
+    }
+
+    let sent = false;
+    if (pendingPreview.action === "join_room" && pendingPreview.chatId) {
+      sent = sendEvent("join_room", {}, { chat_id: pendingPreview.chatId });
+    } else if (pendingPreview.action === "open_dm" && pendingPreview.username) {
+      sent = sendEvent("open_dm", { username: pendingPreview.username });
+    }
+
+    if (!sent) {
+      setErrorText("Не удалось отправить запрос на подключение к чату");
+      return;
+    }
+
+    setErrorText("");
+    setPendingPreviewConnecting(true);
+  }, [pendingPreview, sendEvent]);
 
   const onLeaveRoom = useCallback(() => {
     if (!selectedChat || selectedChat.type !== "room") {
@@ -524,7 +736,7 @@ function App() {
 
   const onMessagesScroll = useCallback(() => {
     const container = messagesRef.current;
-    if (!container) {
+    if (!container || pendingPreview) {
       return;
     }
 
@@ -548,7 +760,7 @@ function App() {
     }
 
     requestHistory(selectedChatId, oldestMessage.created_at);
-  }, [hasMoreByChat, historyLoadingByChat, requestHistory, selectedChatId, selectedMessages]);
+  }, [hasMoreByChat, historyLoadingByChat, pendingPreview, requestHistory, selectedChatId, selectedMessages]);
 
   return (
     <div className="app-shell">
@@ -561,19 +773,25 @@ function App() {
           copyFeedbackKey={copyFeedbackKey}
           onCopy={copyToClipboard}
           onLogout={logoutSession}
+          searchQuery={searchQuery}
+          onSearchQueryChange={onSearchQueryChange}
+          searchStatus={searchStatus}
+          searchResults={searchResults}
+          searchOpenCreateGroup={searchOpenCreateGroup}
+          onToggleCreateGroup={onToggleCreateGroup}
           roomTitle={roomTitle}
           onRoomTitleChange={setRoomTitle}
           onCreateRoom={onCreateRoom}
-          dmTarget={dmTarget}
-          onDmTargetChange={setDmTarget}
-          onOpenDm={onOpenDm}
-          joinRoomId={joinRoomId}
-          onJoinRoomIdChange={setJoinRoomId}
-          onJoinRoom={onJoinRoom}
+          onCancelCreateGroup={onCancelCreateGroup}
+          createGroupSubmitting={createGroupSubmitting}
           chats={chats}
           selectedChat={selectedChat}
           selectedChatId={selectedChatId}
           onSelectChat={selectChat}
+          onSelectSearchResult={onSelectSearchResult}
+          pendingPreview={pendingPreview}
+          pendingPreviewConnecting={pendingPreviewConnecting}
+          onConnectPendingPreview={onConnectPendingPreview}
           formatTimestamp={formatTimestamp}
           onLeaveRoom={onLeaveRoom}
           canLeaveRoom={canLeaveRoom}

@@ -7,6 +7,8 @@ import {
   JoinRoomIcon,
   LeaveRoomIcon,
   LogoutIcon,
+  PlusIcon,
+  SearchIcon,
   SendIcon,
 } from "../ui/icons";
 
@@ -30,19 +32,25 @@ function ChatWorkspace({
   copyFeedbackKey,
   onCopy,
   onLogout,
+  searchQuery,
+  onSearchQueryChange,
+  searchStatus,
+  searchResults,
+  searchOpenCreateGroup,
+  onToggleCreateGroup,
   roomTitle,
   onRoomTitleChange,
   onCreateRoom,
-  dmTarget,
-  onDmTargetChange,
-  onOpenDm,
-  joinRoomId,
-  onJoinRoomIdChange,
-  onJoinRoom,
+  onCancelCreateGroup,
+  createGroupSubmitting,
   chats,
   selectedChat,
   selectedChatId,
   onSelectChat,
+  onSelectSearchResult,
+  pendingPreview,
+  pendingPreviewConnecting,
+  onConnectPendingPreview,
   formatTimestamp,
   onLeaveRoom,
   canLeaveRoom,
@@ -55,6 +63,23 @@ function ChatWorkspace({
   onSendMessage,
   canSendMessage,
 }) {
+  const isSearchMode = searchQuery.trim().length > 0;
+  const displayTitle = pendingPreview ? pendingPreview.title : selectedChat ? selectedChat.title : "Выберите чат";
+  const displayId = pendingPreview?.chatId ?? selectedChat?.id ?? "";
+  const previewBadge = pendingPreview
+    ? pendingPreview.chatType === "dm"
+      ? "Личный чат"
+      : pendingPreview.subtitle
+    : null;
+  const connectButtonLabel = pendingPreviewConnecting ? "Подключаем..." : "Подключиться";
+  const connectIcon = pendingPreview?.chatType === "room" ? JoinRoomIcon : DirectMessageIcon;
+  const listTitle = isSearchMode ? "Результаты поиска" : "Чаты";
+  const listNote = isSearchMode
+    ? searchStatus === "loading"
+      ? "Ищем..."
+      : `${searchResults.length} найдено`
+    : `${chats.length} всего`;
+
   return (
     <div className="workspace-shell">
       <header className="workspace-header">
@@ -90,153 +115,177 @@ function ChatWorkspace({
 
       <main className="workspace-layout">
         <aside className="workspace-sidebar">
-          <section className="toolbar-section">
-            <div className="section-head">
-              <div>
-                <p className="section-label">Действия</p>
-                <h2 className="section-title">Управление чатами</h2>
-              </div>
-              <span className="section-note">Комнаты и личные диалоги</span>
+          <div className="sidebar-top">
+            <div className="search-toolbar">
+              <label className="search-field" htmlFor="catalog-search-input">
+                <SearchIcon className="search-input-icon" aria-hidden="true" />
+                <input
+                  id="catalog-search-input"
+                  className="search-input"
+                  value={searchQuery}
+                  onChange={(event) => onSearchQueryChange(event.target.value)}
+                  placeholder="Поиск людей и групп"
+                  autoComplete="off"
+                />
+              </label>
+              <IconButton
+                icon={PlusIcon}
+                mode="icon-only"
+                variant={searchOpenCreateGroup ? "primary" : "secondary"}
+                title={searchOpenCreateGroup ? "Скрыть создание группы" : "Создать группу"}
+                ariaLabel={searchOpenCreateGroup ? "Скрыть создание группы" : "Создать группу"}
+                onClick={onToggleCreateGroup}
+              />
             </div>
 
-            <form className="action-card" onSubmit={onCreateRoom}>
-              <div className="action-copy">
-                <p className="action-title">Создать комнату</p>
-                <p className="action-subtitle">Новая общая комната появится в списке сразу после создания.</p>
-              </div>
-              <div className="stack">
+            {searchOpenCreateGroup ? (
+              <form className="create-inline-panel" onSubmit={onCreateRoom}>
+                <div className="create-inline-copy">
+                  <p className="action-title">Новая группа</p>
+                  <p className="action-subtitle">Введите название и создайте группу из этой же колонки.</p>
+                </div>
                 <input
-                  id="room-input"
                   className="input"
                   value={roomTitle}
                   onChange={(event) => onRoomTitleChange(event.target.value)}
-                  placeholder="Название комнаты"
+                  placeholder="Название группы"
                   autoComplete="off"
                 />
-                <IconButton
-                  icon={CreateRoomIcon}
-                  label="Создать"
-                  type="submit"
-                  variant="primary"
-                  mode="icon-text"
-                  title="Создать комнату"
-                  ariaLabel="Создать комнату"
-                />
-              </div>
-            </form>
-
-            <form className="action-card" onSubmit={onOpenDm}>
-              <div className="action-copy">
-                <p className="action-title">Открыть личный чат</p>
-                <p className="action-subtitle">Введите имя пользователя, чтобы начать личную переписку.</p>
-              </div>
-              <div className="stack">
-                <input
-                  id="dm-input"
-                  className="input"
-                  value={dmTarget}
-                  onChange={(event) => onDmTargetChange(event.target.value)}
-                  placeholder="Имя пользователя"
-                  autoComplete="off"
-                />
-                <IconButton
-                  icon={DirectMessageIcon}
-                  label="Открыть"
-                  type="submit"
-                  variant="secondary"
-                  mode="icon-text"
-                  title="Открыть личный чат"
-                  ariaLabel="Открыть личный чат"
-                />
-              </div>
-            </form>
-
-            <form className="action-card" onSubmit={onJoinRoom}>
-              <div className="action-copy">
-                <p className="action-title">Войти в комнату по ID</p>
-                <p className="action-subtitle">Используйте ID комнаты, если он уже известен.</p>
-              </div>
-              <div className="stack">
-                <input
-                  id="join-room-input"
-                  className="input"
-                  value={joinRoomId}
-                  onChange={(event) => onJoinRoomIdChange(event.target.value)}
-                  placeholder="ID комнаты"
-                  autoComplete="off"
-                />
-                <IconButton
-                  icon={JoinRoomIcon}
-                  label="Войти"
-                  type="submit"
-                  variant="secondary"
-                  mode="icon-text"
-                  title="Войти в комнату"
-                  ariaLabel="Войти в комнату по ID"
-                />
-              </div>
-            </form>
-          </section>
+                <div className="create-inline-actions">
+                  <IconButton
+                    icon={CreateRoomIcon}
+                    label={createGroupSubmitting ? "Создаём..." : "Создать"}
+                    type="submit"
+                    variant="primary"
+                    mode="icon-text"
+                    disabled={createGroupSubmitting}
+                    title="Создать группу"
+                    ariaLabel="Создать группу"
+                  />
+                  <IconButton
+                    icon={PlusIcon}
+                    label="Отмена"
+                    type="button"
+                    variant="secondary"
+                    mode="icon-text"
+                    disabled={createGroupSubmitting}
+                    title="Отменить создание группы"
+                    ariaLabel="Отменить создание группы"
+                    onClick={onCancelCreateGroup}
+                  />
+                </div>
+              </form>
+            ) : null}
+          </div>
 
           <section className="chat-list-wrap">
             <div className="section-head">
               <div>
                 <p className="section-label">Навигация</p>
-                <h2 className="section-title">Чаты</h2>
+                <h2 className="section-title">{listTitle}</h2>
               </div>
-              <span className="section-note">{chats.length} всего</span>
+              <span className="section-note">{listNote}</span>
             </div>
 
             <div className="chat-list">
-              {chats.length === 0 ? (
-                <EmptyState title="Пока нет чатов" text="Создайте комнату или откройте личный диалог, чтобы начать." />
-              ) : null}
-              {chats.map((chat) => {
-                const isActive = chat.id === selectedChatId;
-                return (
-                  <button
-                    type="button"
-                    className={`chat-card${isActive ? " active" : ""}`}
-                    key={chat.id}
-                    onClick={() => onSelectChat(chat.id)}
-                    title={chat.title}
-                  >
-                    <div className="chat-card-top">
-                      <span className="chat-title">{chat.title}</span>
-                      <span className="chat-time">{formatTimestamp(chat.last_message_at)}</span>
-                    </div>
-                    <div className="chat-card-bottom">
-                      <span className="chat-preview">{chat.last_message_preview || "Пока нет сообщений"}</span>
-                      <span className="chat-kind">{chat.type === "dm" ? "ЛС" : "Комната"}</span>
-                    </div>
-                    <div className="chat-card-id" title={chat.id}>
-                      ID: {chat.id}
-                    </div>
-                  </button>
-                );
-              })}
+              {isSearchMode ? (
+                <>
+                  {searchStatus === "loading" ? (
+                    <EmptyState title="Ищем..." text="Подбираем пользователей и группы по вашему запросу." />
+                  ) : null}
+                  {searchStatus === "ready" && searchResults.length === 0 ? (
+                    <EmptyState title="Ничего не найдено" text="Попробуйте сократить запрос или ввести другое имя." />
+                  ) : null}
+                  {searchResults.map((result) => {
+                    const isActive =
+                      pendingPreview?.resultId === result.result_id ||
+                      (!pendingPreview && result.action === "open" && result.chat_id === selectedChatId);
+                    const stateLabel = result.action === "open" ? "Открыт" : "Подключиться";
+                    return (
+                      <button
+                        type="button"
+                        key={result.result_id}
+                        className={`search-card${isActive ? " active" : ""}`}
+                        onClick={() => onSelectSearchResult(result)}
+                        title={result.title}
+                      >
+                        <div className="search-card-top">
+                          <div className="search-card-copy">
+                            <span className="chat-title">{result.title}</span>
+                            <span className="search-card-subtitle">{result.subtitle}</span>
+                          </div>
+                          <span className={`search-state search-state-${result.action === "open" ? "open" : "connect"}`}>
+                            {stateLabel}
+                          </span>
+                        </div>
+                        <div className="search-card-bottom">
+                          <span className="chat-kind">{result.chat_type === "dm" ? "ЛС" : "Группа"}</span>
+                          {result.action === "open" && result.last_message_at ? (
+                            <span className="chat-time">{formatTimestamp(result.last_message_at)}</span>
+                          ) : null}
+                        </div>
+                        {result.action === "open" && result.last_message_preview ? (
+                          <div className="search-preview">{result.last_message_preview}</div>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </>
+              ) : (
+                <>
+                  {chats.length === 0 ? (
+                    <EmptyState title="Пока нет чатов" text="Используйте поиск или создайте новую группу через кнопку справа." />
+                  ) : null}
+                  {chats.map((chat) => {
+                    const isActive = chat.id === selectedChatId && !pendingPreview;
+                    return (
+                      <button
+                        type="button"
+                        className={`chat-card${isActive ? " active" : ""}`}
+                        key={chat.id}
+                        onClick={() => onSelectChat(chat.id)}
+                        title={chat.title}
+                      >
+                        <div className="chat-card-top">
+                          <span className="chat-title">{chat.title}</span>
+                          <span className="chat-time">{formatTimestamp(chat.last_message_at)}</span>
+                        </div>
+                        <div className="chat-card-bottom">
+                          <span className="chat-preview">{chat.last_message_preview || "Пока нет сообщений"}</span>
+                          <span className="chat-kind">{chat.type === "dm" ? "ЛС" : "Группа"}</span>
+                        </div>
+                        <div className="chat-card-id" title={chat.id}>
+                          ID: {chat.id}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
             </div>
           </section>
         </aside>
 
         <section className="workspace-content">
           <div className="chat-head">
-            <div className="chat-head-copy">
-              <p className="section-label">Текущий чат</p>
-              <h2 className="chat-head-title">{selectedChat ? selectedChat.title : "Выберите чат"}</h2>
-              {selectedChat ? (
+            <div className="chat-head-main">
+              <span className="chat-head-kicker">Текущий чат</span>
+              <h2 className="chat-head-title">{displayTitle}</h2>
+              {displayId ? (
                 <CopyableId
-                  value={selectedChat.id}
-                  shortValue={selectedChat.id.slice(0, 8)}
+                  value={displayId}
+                  shortValue={displayId.slice(0, 8)}
                   label="ID чата"
                   copyStateKey={copyFeedbackKey}
                   onCopy={onCopy}
+                  compact
                 />
               ) : null}
             </div>
 
             <div className="chat-head-meta">
-              {selectedChat ? (
+              {pendingPreview ? <span className="meta-badge">{previewBadge}</span> : null}
+              {!pendingPreview && selectedChat ? (
                 <span className="meta-badge">
                   Онлайн: {selectedChat.online_user_ids?.length ?? 0} / {selectedChat.member_ids?.length ?? 0}
                 </span>
@@ -255,8 +304,13 @@ function ChatWorkspace({
           </div>
 
           <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
-            {!selectedChat ? (
-              <EmptyState title="Выберите чат" text="Слева доступны комнаты и личные диалоги. После выбора можно читать историю и отправлять сообщения." />
+            {pendingPreview ? (
+              <EmptyState
+                title="Сообщения будут доступны после подключения"
+                text="Сначала подключитесь к найденному чату. После этого появится история и можно будет писать сообщения."
+              />
+            ) : !selectedChat ? (
+              <EmptyState title="Выберите чат" text="Слева доступны ваши чаты и результаты поиска. После выбора можно читать историю и отправлять сообщения." />
             ) : (
               <>
                 {historyLoading ? <div className="history-loader">Загружаем историю...</div> : null}
@@ -281,28 +335,48 @@ function ChatWorkspace({
             )}
           </div>
 
-          <form className="composer" onSubmit={onSendMessage}>
-            <div className="composer-input-wrap">
-              <input
-                className="input"
-                value={messageInput}
-                onChange={(event) => onMessageInputChange(event.target.value)}
-                placeholder={canSendMessage ? "Введите сообщение..." : "Подключитесь и выберите чат"}
-                disabled={!canSendMessage}
-                autoComplete="off"
+          {pendingPreview ? (
+            <div className="connect-bar">
+              <div className="connect-bar-copy">
+                <p className="connect-bar-title">Подключитесь к чату</p>
+                <p className="connect-bar-text">После подключения откроется история и появится поле отправки сообщений.</p>
+              </div>
+              <IconButton
+                icon={connectIcon}
+                label={connectButtonLabel}
+                type="button"
+                variant="primary"
+                mode="icon-text"
+                disabled={pendingPreviewConnecting}
+                title="Подключиться к чату"
+                ariaLabel="Подключиться к чату"
+                onClick={onConnectPendingPreview}
               />
             </div>
-            <IconButton
-              icon={SendIcon}
-              label="Отправить"
-              type="submit"
-              variant="primary"
-              mode="icon-text"
-              disabled={!canSendMessage}
-              title="Отправить сообщение"
-              ariaLabel="Отправить сообщение"
-            />
-          </form>
+          ) : (
+            <form className="composer" onSubmit={onSendMessage}>
+              <div className="composer-input-wrap">
+                <input
+                  className="input"
+                  value={messageInput}
+                  onChange={(event) => onMessageInputChange(event.target.value)}
+                  placeholder={canSendMessage ? "Введите сообщение..." : "Выберите чат, чтобы писать сообщения"}
+                  disabled={!canSendMessage}
+                  autoComplete="off"
+                />
+              </div>
+              <IconButton
+                icon={SendIcon}
+                label="Отправить"
+                type="submit"
+                variant="primary"
+                mode="icon-text"
+                disabled={!canSendMessage}
+                title="Отправить сообщение"
+                ariaLabel="Отправить сообщение"
+              />
+            </form>
+          )}
         </section>
       </main>
     </div>

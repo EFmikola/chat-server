@@ -106,6 +106,9 @@ class ChatService:
         if event.event_type == "create_room":
             await self._handle_create_room(user_id, event)
             return
+        if event.event_type == "search_catalog":
+            await self._handle_search_catalog(user_id, event)
+            return
         if event.event_type == "join_room":
             await self._handle_join_room(user_id, event)
             return
@@ -198,6 +201,33 @@ class ChatService:
         await self._send_chat_upserts(chat.id, serialized)
         await self._connection_manager.broadcast(recipients, message_event)
         await self.broadcast_presence(chat.id)
+
+    async def _handle_search_catalog(self, user_id: str, event: InboundEvent) -> None:
+        query_raw = event.payload.get("query")
+        if not isinstance(query_raw, str):
+            raise ValidationError("Field 'payload.query' is required")
+
+        query = query_raw.strip()
+        limit_raw = event.payload.get("limit", 20)
+        if not isinstance(limit_raw, int):
+            raise ValidationError("Field 'payload.limit' must be an integer")
+        if limit_raw < 1 or limit_raw > 20:
+            raise ValidationError("Field 'payload.limit' must be in range 1..20")
+
+        async with self._state_lock:
+            results = self._search_results_locked(user_id, query, limit_raw)
+
+        username = self.username_for(user_id)
+        self._writer.enqueue_event(
+            "search_catalog",
+            username,
+            None,
+            {"query": query, "limit": limit_raw, "results_count": len(results)},
+        )
+        await self._connection_manager.send(
+            user_id,
+            build_event("search_results", payload={"query": query, "results": results}),
+        )
 
     async def _handle_join_room(self, user_id: str, event: InboundEvent) -> None:
         chat_id = self._extract_chat_id(event)
@@ -428,6 +458,110 @@ class ChatService:
 
         username = self.username_for(user_id)
         self._writer.enqueue_event("history_request", username, chat_id, {"limit": limit})
+
+    def _search_results_locked(self, user_id: str, query: str, limit: int) -> list[dict[str, Any]]:
+        query_normalized = self._normalize_username(query)
+        if not query_normalized:
+            return []
+
+        ranked_results: list[tuple[int, int, str, dict[str, Any]]] = []
+
+        for user in self._users_by_id.values():
+            if user.id == user_id:
+                continue
+
+            username_normalized = self._normalize_username(user.username)
+            if query_normalized not in username_normalized:
+                continue
+
+            dm_key = tuple(sorted((user_id, user.id)))
+            dm_chat_id = self._dm_chat_index.get(dm_key)
+            existing_dm = self._chats_by_id.get(dm_chat_id) if dm_chat_id is not None else None
+            result = self._serialize_user_search_result_locked(
+                viewer_id=user_id,
+                target_user=user,
+                chat=existing_dm,
+            )
+            prefix_rank = 0 if username_normalized.startswith(query_normalized) else 1
+            action_rank = 0 if result["action"] == "open" else 1
+            ranked_results.append((prefix_rank, action_rank, result["title"].lower(), result))
+
+        for chat in self._chats_by_id.values():
+            if chat.chat_type != "room":
+                continue
+
+            title_normalized = self._normalize_username(chat.title)
+            if query_normalized not in title_normalized:
+                continue
+
+            result = self._serialize_room_search_result_locked(viewer_id=user_id, chat=chat)
+            prefix_rank = 0 if title_normalized.startswith(query_normalized) else 1
+            action_rank = 0 if result["action"] == "open" else 1
+            ranked_results.append((prefix_rank, action_rank, result["title"].lower(), result))
+
+        ranked_results.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in ranked_results[:limit]]
+
+    def _serialize_user_search_result_locked(
+        self,
+        viewer_id: str,
+        target_user: User,
+        chat: BaseChat | None,
+    ) -> dict[str, Any]:
+        if chat is not None:
+            last_message = chat.message_history[-1] if chat.message_history else None
+            return {
+                "result_id": f"user:{target_user.id}",
+                "kind": "user",
+                "chat_type": "dm",
+                "action": "open",
+                "chat_id": chat.id,
+                "user_id": target_user.id,
+                "username": target_user.username,
+                "title": target_user.username,
+                "subtitle": "Личный чат",
+                "is_member": True,
+                "member_count": None,
+                "last_message_at": chat.last_message_at.isoformat() if chat.last_message_at is not None else None,
+                "last_message_preview": last_message.content if last_message is not None else "",
+            }
+
+        return {
+            "result_id": f"user:{target_user.id}",
+            "kind": "user",
+            "chat_type": "dm",
+            "action": "open_dm",
+            "chat_id": None,
+            "user_id": target_user.id,
+            "username": target_user.username,
+            "title": target_user.username,
+            "subtitle": "Пользователь",
+            "is_member": False,
+            "member_count": None,
+            "last_message_at": None,
+            "last_message_preview": "",
+        }
+
+    def _serialize_room_search_result_locked(self, viewer_id: str, chat: BaseChat) -> dict[str, Any]:
+        is_member = chat.has_member(viewer_id)
+        last_message = chat.message_history[-1] if chat.message_history and is_member else None
+        member_count = len(chat.members)
+        subtitle = "Группа" if is_member else f"Группа - {member_count} участников"
+        return {
+            "result_id": f"room:{chat.id}",
+            "kind": "room",
+            "chat_type": "room",
+            "action": "open" if is_member else "join_room",
+            "chat_id": chat.id,
+            "user_id": None,
+            "username": None,
+            "title": chat.title,
+            "subtitle": subtitle,
+            "is_member": is_member,
+            "member_count": member_count,
+            "last_message_at": chat.last_message_at.isoformat() if is_member and chat.last_message_at is not None else None,
+            "last_message_preview": last_message.content if last_message is not None else "",
+        }
 
     async def _send_chat_upserts(self, chat_id: str, serialized_by_user: dict[str, dict[str, Any]]) -> None:
         for user_id, serialized_chat in serialized_by_user.items():
