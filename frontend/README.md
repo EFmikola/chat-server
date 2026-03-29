@@ -807,3 +807,165 @@ http://localhost:5173
 - Strategy — фильтрация текста сообщений
 - Repository — работа с SQLite
 - Factory — создание чатов
+
+
+Отлично 👍
+Вот готовый блок для README.md. Можешь просто вставить его в файл.
+
+---
+
+# 🚀 Запуск проекта (Backend + Frontend)
+
+Проект состоит из двух частей:
+
+* **Backend** — FastAPI (Python)
+* **Frontend** — React + Vite (Node.js)
+
+⚠️ Backend и Frontend запускаются **в разных окнах терминала**.
+
+---
+
+# 📦 Предварительные требования
+
+Перед запуском убедитесь, что установлены:
+
+* Python 3.11+
+* Node.js 18+
+* Git
+
+Проверить можно командами:
+
+```bash
+python --version
+node -v
+git --version
+```
+
+---
+
+# 🖥️ 1. Запуск Backend (FastAPI)
+
+## 🔹 Шаг 1. Открыть терминал №1
+
+Перейти в папку backend:
+
+```powershell
+cd C:\Users\Kolya\Projects\chat-server-project\backend
+```
+
+## 🔹 Шаг 2. Активировать виртуальное окружение
+
+```powershell
+.\.venv\Scripts\activate
+```
+
+Если виртуальное окружение не создано:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install fastapi uvicorn[standard]
+```
+
+## 🔹 Шаг 3. Запустить сервер
+
+```powershell
+uvicorn app.main:app --reload --port 8000
+```
+
+После запуска в терминале должно появиться:
+
+```
+Application startup complete.
+Uvicorn running on http://127.0.0.1:8000
+```
+
+Backend теперь работает по адресу:
+
+```
+http://localhost:8000
+```
+
+WebSocket endpoint:
+
+```
+ws://localhost:8000/ws
+```
+
+⚠️ Этот терминал не закрывать.
+
+---
+
+# 🌐 2. Запуск Frontend (React + Vite)
+
+## 🔹 Шаг 1. Открыть терминал №2
+
+Очень важно: открыть **второе окно терминала**.
+
+Перейти в папку frontend:
+
+```powershell
+cd C:\Users\Kolya\Projects\chat-server-project\frontend
+```
+
+## 🔹 Шаг 2. Установить зависимости (если запускаете первый раз)
+
+```powershell
+npm install
+```
+
+## 🔹 Шаг 3. Запустить frontend
+
+```powershell
+npm run dev
+```
+
+В терминале появится адрес, обычно:
+
+```
+http://localhost:5173/
+```
+
+Откройте его в браузере.
+
+---
+
+# 🔗 Как это работает вместе
+
+1. Frontend (React) открывается на:
+
+   ```
+   http://localhost:5173
+   ```
+
+2. Он подключается к Backend через WebSocket:
+
+   ```
+   ws://localhost:8000/ws
+   ```
+
+3. Backend обрабатывает события и отправляет данные обратно в реальном времени.
+
+---
+
+# 🛑 Остановка проекта
+
+Чтобы остановить сервер или frontend:
+
+В соответствующем терминале нажать:
+
+```
+Ctrl + C
+```
+
+---
+
+# 📌 Важно
+
+| Папка    | Команды                  |
+| -------- | ------------------------ |
+| backend  | python, pip, uvicorn     |
+| frontend | npm install, npm run dev |
+
+Нельзя запускать `npm` в папке backend.
+Нельзя запускать `uvicorn` в папке frontend.
